@@ -7,6 +7,7 @@ import "./styles.css";
 const API_URL = "http://127.0.0.1:8765";
 type FeedItem = { id: string; kind: "user" | "agent" | "tool" | "error"; text: string };
 type Approval = { actionId: string; action: BrowserAction; reason: string };
+type SavedSession = { id: string; preview: string; updatedAt: number };
 
 class PanelErrorBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
   state: { error?: Error } = {};
@@ -29,6 +30,7 @@ function App() {
     return Number.isInteger(value) && value > 0 ? value : undefined;
   }, []);
   const sessionSlot = useMemo(() => `heybrowsy.current-session.${anchorTabId ?? "active"}`, [anchorTabId]);
+  const sessionIndexKey = "heybrowsy.sessions";
   const [sessionId, setSessionId] = useState(() => {
     const previous = localStorage.getItem(sessionSlot);
     return previous || `browser-tab-${anchorTabId ?? "active"}`;
@@ -43,6 +45,8 @@ function App() {
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [visibleFeedCount, setVisibleFeedCount] = useState(80);
   const [approval, setApproval] = useState<Approval>();
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
   const feedRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const streamRef = useRef<EventSource | undefined>(undefined);
@@ -77,9 +81,21 @@ function App() {
   useEffect(() => {
     if (!historyLoaded) return;
     const key = `heybrowsy.feed.${sessionId}`;
-    const timeout = setTimeout(() => { void chrome.storage.local.set({ [key]: feed.slice(-400) }); }, 120);
+    const timeout = setTimeout(() => {
+      const savedFeed = feed.slice(-400);
+      void chrome.storage.local.set({ [key]: savedFeed });
+      if (savedFeed.length) {
+        void chrome.storage.local.get(sessionIndexKey).then((stored) => {
+          const existing = Array.isArray(stored[sessionIndexKey]) ? stored[sessionIndexKey] as SavedSession[] : [];
+          const latestUserMessage = [...savedFeed].reverse().find((item) => item.kind === "user")?.text || "Untitled session";
+          const entry: SavedSession = { id: sessionId, preview: latestUserMessage.slice(0, 90), updatedAt: Date.now() };
+          const next = [entry, ...existing.filter((item) => item.id !== sessionId)].slice(0, 30);
+          void chrome.storage.local.set({ [sessionIndexKey]: next });
+        });
+      }
+    }, 120);
     return () => clearTimeout(timeout);
-  }, [feed, historyLoaded, sessionId]);
+  }, [feed, historyLoaded, sessionId, sessionIndexKey]);
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -200,9 +216,48 @@ function App() {
     setFeed([]);
     setTaskId(undefined);
     setApproval(undefined);
+    setHistoryOpen(false);
     setVisibleFeedCount(80);
     setSessionId(nextSessionId);
     await chrome.storage.session.remove(previousActiveTaskKey);
+    await chrome.runtime.sendMessage({ type: "HB_RELEASE_BROWSER" }).catch(() => undefined);
+  }
+
+  async function openHistory() {
+    if (running) return;
+    if (historyOpen) { setHistoryOpen(false); return; }
+    const stored = await chrome.storage.local.get(null);
+    const indexed = Array.isArray(stored[sessionIndexKey]) ? stored[sessionIndexKey] as SavedSession[] : [];
+    const byId = new Map(indexed.map((item) => [item.id, item]));
+    const feedKeyPrefix = "heybrowsy.feed.";
+    Object.entries(stored).forEach(([key, value]) => {
+      if (!key.startsWith(feedKeyPrefix)) return;
+      const id = key.slice(feedKeyPrefix.length);
+      if (!id.startsWith("browser-tab-") || !Array.isArray(value) || value.length === 0) return;
+      const items = value as FeedItem[];
+      const latestUserMessage = [...items].reverse().find((item) => item.kind === "user")?.text || "Untitled session";
+      const indexedItem = byId.get(id);
+      byId.set(id, { id, preview: indexedItem?.preview || latestUserMessage.slice(0, 90), updatedAt: indexedItem?.updatedAt || 0 });
+    });
+    setSavedSessions([...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt));
+    setHistoryOpen(true);
+  }
+
+  async function loadSession(nextSessionId: string) {
+    if (running || nextSessionId === sessionId) { setHistoryOpen(false); return; }
+    streamRef.current?.close();
+    processedEventsRef.current.clear();
+    queuedEventsRef.current.clear();
+    resumeAttemptedRef.current = false;
+    setHistoryLoaded(false);
+    setFeed([]);
+    setGoal("");
+    setTaskId(undefined);
+    setApproval(undefined);
+    setVisibleFeedCount(80);
+    setHistoryOpen(false);
+    localStorage.setItem(sessionSlot, nextSessionId);
+    setSessionId(nextSessionId);
     await chrome.runtime.sendMessage({ type: "HB_RELEASE_BROWSER" }).catch(() => undefined);
   }
 
@@ -210,10 +265,22 @@ function App() {
     <header>
       <div className="brand"><span className="spark">✦</span><span>heybrowsy</span><span className="beta">alpha</span></div>
       <div className="header-actions">
+        <button className={`history-button ${historyOpen ? "selected" : ""}`} type="button" disabled={running} onClick={() => void openHistory()} aria-label="Conversation history" title={running ? "Stop the current task before loading history" : "Conversation history"}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5M12 7v5l3 2"/></svg>
+        </button>
         <button className="new-session" type="button" disabled={running} onClick={() => void newSession()} aria-label="Start a new session" title={running ? "Stop the current task before starting a new session" : "Start a new session"}><span>＋</span> New</button>
         <div className={`status ${connected ? "online" : ""}`}><i />{connected ? "ready" : "offline"}</div>
       </div>
     </header>
+    {historyOpen && <section className="history-panel" aria-label="Conversation history">
+      <div className="history-heading"><div><p className="eyebrow">CONVERSATIONS</p><strong>Continue a session</strong></div><button onClick={() => setHistoryOpen(false)} aria-label="Close history">×</button></div>
+      <div className="history-list">
+        {savedSessions.length === 0 && <p className="history-empty">No previous conversations yet.</p>}
+        {savedSessions.map((item) => <button key={item.id} className={item.id === sessionId ? "current" : ""} onClick={() => void loadSession(item.id)}>
+          <span>{item.preview}</span><small>{item.id === sessionId ? "Current session" : item.updatedAt ? new Date(item.updatedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "Saved session"}</small>
+        </button>)}
+      </div>
+    </section>}
     <section className="hero">
       <p className="eyebrow">BROWSER WORK AGENT</p>
       <h1>Tell the web<br/><em>what to do.</em></h1>
