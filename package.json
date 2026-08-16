@@ -1,0 +1,11 @@
+{
+  "name": "heybrowsy",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "npm --prefix extension run build",
+    "test": "npm --prefix extension run test",
+    "dev:extension": "npm --prefix extension run dev"
+  }
+}
+

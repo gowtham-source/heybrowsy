@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "heybrowsy",
+  "description": "A fast, accurate, approval-aware browser work agent.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "action": { "default_title": "Open heybrowsy" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_start", "all_frames": false }
+  ],
+  "permissions": ["sidePanel", "activeTab", "scripting", "storage", "tabs", "tabGroups", "downloads"],
+  "host_permissions": ["http://127.0.0.1:8765/*", "http://localhost:8765/*"],
+  "optional_host_permissions": ["<all_urls>"],
+  "commands": {
+    "toggle-side-panel": {
+      "description": "Open heybrowsy",
+      "suggested_key": { "default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y" }
+    }
+  }
+}
