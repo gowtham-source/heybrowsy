@@ -62,14 +62,14 @@ class BrowserAction(BaseModel):
     url: str | None = None
     direction: Literal["up", "down"] | None = None
     amount: int | None = None
-    rationale: str = ""
-    expected_change: str = ""
+    rationale: str = Field(default="", max_length=500)
+    expected_change: str = Field(default="", max_length=300)
 
 
 class AgentDecision(BaseModel):
-    analysis: str = Field(max_length=1200)
+    analysis: str = Field(max_length=700)
     action: BrowserAction
-    answer: str | None = None
+    answer: str | None = Field(default=None, max_length=4000)
     confidence: float = Field(ge=0, le=1, default=0.5)
     provider: str | None = None
     model: str | None = None
