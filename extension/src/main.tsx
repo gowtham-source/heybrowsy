@@ -28,7 +28,11 @@ function App() {
     const value = Number(new URLSearchParams(location.search).get("tabId"));
     return Number.isInteger(value) && value > 0 ? value : undefined;
   }, []);
-  const sessionId = useMemo(() => `browser-tab-${anchorTabId ?? "active"}`, [anchorTabId]);
+  const sessionSlot = useMemo(() => `heybrowsy.current-session.${anchorTabId ?? "active"}`, [anchorTabId]);
+  const [sessionId, setSessionId] = useState(() => {
+    const previous = localStorage.getItem(sessionSlot);
+    return previous || `browser-tab-${anchorTabId ?? "active"}`;
+  });
   const activeTaskKey = useMemo(() => `heybrowsy.active.${sessionId}`, [sessionId]);
   const [goal, setGoal] = useState("");
   const [mode, setMode] = useState<SpeedMode>("balanced");
@@ -50,6 +54,8 @@ function App() {
   useEffect(() => { api.health().then(() => setConnected(true)).catch(() => setConnected(false)); }, [api]);
   useEffect(() => {
     const key = `heybrowsy.feed.${sessionId}`;
+    setHistoryLoaded(false);
+    setFeed([]);
     void chrome.storage.local.get(key).then((stored) => {
       const restored = stored[key];
       if (Array.isArray(restored)) setFeed(restored.slice(-400) as FeedItem[]);
@@ -181,10 +187,32 @@ function App() {
     await chrome.runtime.sendMessage({ type: "HB_RELEASE_BROWSER" }).catch(() => undefined);
   }
 
+  async function newSession() {
+    if (running) return;
+    const previousActiveTaskKey = activeTaskKey;
+    const nextSessionId = `browser-tab-${anchorTabId ?? "active"}-${crypto.randomUUID()}`;
+    localStorage.setItem(sessionSlot, nextSessionId);
+    streamRef.current?.close();
+    processedEventsRef.current.clear();
+    queuedEventsRef.current.clear();
+    resumeAttemptedRef.current = false;
+    setGoal("");
+    setFeed([]);
+    setTaskId(undefined);
+    setApproval(undefined);
+    setVisibleFeedCount(80);
+    setSessionId(nextSessionId);
+    await chrome.storage.session.remove(previousActiveTaskKey);
+    await chrome.runtime.sendMessage({ type: "HB_RELEASE_BROWSER" }).catch(() => undefined);
+  }
+
   return <main className={feed.length || running ? "active" : ""}>
     <header>
       <div className="brand"><span className="spark">✦</span><span>heybrowsy</span><span className="beta">alpha</span></div>
-      <div className={`status ${connected ? "online" : ""}`}><i />{connected ? "ready" : "offline"}</div>
+      <div className="header-actions">
+        <button className="new-session" type="button" disabled={running} onClick={() => void newSession()} aria-label="Start a new session" title={running ? "Stop the current task before starting a new session" : "Start a new session"}><span>＋</span> New</button>
+        <div className={`status ${connected ? "online" : ""}`}><i />{connected ? "ready" : "offline"}</div>
+      </div>
     </header>
     <section className="hero">
       <p className="eyebrow">BROWSER WORK AGENT</p>

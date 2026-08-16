@@ -69,7 +69,8 @@ function captureSnapshotInPage(): PageSnapshot {
       };
     });
   const visibleText = (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 12_000);
-  const signature = `${location.href}|${document.title}|${visibleText.slice(0, 2000)}|${elements.map((element) => element.id).join(",")}`;
+  const elementState = elements.map((element) => `${element.id}:${element.value ?? ""}:${element.disabled ? 1 : 0}`).join(",");
+  const signature = `${location.href}|${document.title}|${visibleText.slice(0, 2000)}|${scrollX}:${scrollY}|${elementState}`;
   return {
     url: location.href,
     title: document.title,

@@ -5,9 +5,10 @@ from uuid import uuid4
 from .config import Settings
 from .context import compact_action_result, compact_history, compact_snapshot
 from .memory import SessionMemoryStore
-from .models import ActionResult, BrowserAction, Event, PageSnapshot, TaskCreate
+from .models import ActionResult, BrowserAction, Event, PageSnapshot, SpeedMode, TaskCreate
 from .provider import ModelProvider
 from .security import approval_reason
+from .sharpness import action_signature, goal_complexity, planning_mode
 
 
 TERMINAL = {"complete", "failed", "cancelled"}
@@ -26,6 +27,12 @@ class TaskRuntime:
     replay: list[Event] = field(default_factory=list)
     cancelled: bool = False
     memory_recorded: bool = False
+    planning_mode: SpeedMode | None = None
+    no_progress_count: int = 0
+    duplicate_decisions: int = 0
+    last_action_signature: tuple[Any, ...] | None = None
+    last_action_fingerprint: str | None = None
+    page_trail: list[dict[str, str]] = field(default_factory=list)
 
     async def emit(self, event_type: str, **data: Any) -> None:
         event = Event(type=event_type, task_id=self.id, data=data)
@@ -52,14 +59,38 @@ class AgentHarness:
     async def run(self, task: TaskRuntime) -> None:
         try:
             task.status = "running"
-            await task.emit("status", status="running", message=f"Starting in {task.request.mode.value} mode")
+            task.planning_mode = planning_mode(task.request.mode, task.request.goal)
+            task.page_trail = [{"url": task.snapshot.url, "title": task.snapshot.title[:160]}]
+            if task.planning_mode != task.request.mode:
+                message = (
+                    f"Starting in {task.request.mode.value} mode with {task.planning_mode.value} planning "
+                    "because this is a multi-stage task"
+                )
+            else:
+                message = f"Starting in {task.request.mode.value} mode"
+            await task.emit(
+                "status", status="running", message=message,
+                requested_mode=task.request.mode.value, planning_mode=task.planning_mode.value,
+                complexity=goal_complexity(task.request.goal),
+            )
             for step in range(self.settings.max_steps):
                 if task.cancelled:
                     await self._finalize(task, "cancelled"); return
-                context = compact_snapshot(task.snapshot, task.request.goal, max_text=4500 if task.request.mode.value == "fast" else 7000)
+                mode = task.planning_mode or task.request.mode
+                context = compact_snapshot(task.snapshot, task.request.goal, max_text=4500 if mode == SpeedMode.fast else 7000)
                 memory = self.memory.context(task.request.session_id)
                 history = compact_history(task.history, memory, self.settings.history_recent_steps)
-                decision = await self.provider.decide(goal=task.request.goal, mode=task.request.mode, context=context, history=history)
+                history["task_state"] = {
+                    "original_goal": task.request.goal,
+                    "requested_mode": task.request.mode.value,
+                    "planning_mode": mode.value,
+                    "steps_taken": len(task.history),
+                    "no_progress_count": task.no_progress_count,
+                    "duplicate_decisions_blocked": task.duplicate_decisions,
+                    "page_trail": task.page_trail[-8:],
+                    "instruction": "Advance the original goal; do not revisit completed pages unless new evidence requires it.",
+                }
+                decision = await self.provider.decide(goal=task.request.goal, mode=mode, context=context, history=history)
                 await task.emit("thought", message=decision.analysis, confidence=decision.confidence, step=step + 1, provider=decision.provider, model=decision.model)
                 action = decision.action
                 action.id = action.id or uuid4().hex
@@ -67,6 +98,17 @@ class AgentHarness:
                     answer = decision.answer or "Task complete"
                     await self._finalize(task, "complete", answer, steps=len(task.history), confidence=decision.confidence)
                     return
+                signature = action_signature(action)
+                if signature == task.last_action_signature and task.snapshot.fingerprint == task.last_action_fingerprint:
+                    task.duplicate_decisions += 1
+                    task.no_progress_count += 1
+                    error = "Loop guard blocked a duplicate action on an unchanged page; choose a different recovery action"
+                    task.history.append({"action": action.model_dump(exclude_none=True), "result": {"ok": False, "error": error, "loop_guard": True}})
+                    await task.emit("verification", action_id=action.id, ok=False, state_changed=False, error=error)
+                    if task.planning_mode == SpeedMode.fast:
+                        task.planning_mode = SpeedMode.balanced
+                        await task.emit("status", status="running", message="No progress detected; escalating to balanced planning")
+                    continue
                 element = next((item for item in task.snapshot.elements if item.id == action.element_id), None)
                 element_description = f"{element.name} {element.type or ''}" if element else ""
                 reason = approval_reason(action, task.snapshot.url, element_description)
@@ -81,8 +123,16 @@ class AgentHarness:
                     old_fingerprint = task.snapshot.fingerprint
                     task.snapshot = result.snapshot
                     changed = old_fingerprint != result.snapshot.fingerprint
+                    if changed and (not task.page_trail or task.page_trail[-1]["url"] != task.snapshot.url):
+                        task.page_trail.append({"url": task.snapshot.url, "title": task.snapshot.title[:160]})
                 else:
                     changed = bool(result.navigated)
+                task.last_action_signature = signature
+                task.last_action_fingerprint = task.snapshot.fingerprint
+                task.no_progress_count = 0 if changed else task.no_progress_count + 1
+                if task.no_progress_count >= 2 and task.planning_mode == SpeedMode.fast:
+                    task.planning_mode = SpeedMode.balanced
+                    await task.emit("status", status="running", message="The page is unchanged; escalating to balanced planning")
                 await task.emit("verification", action_id=action.id, ok=result.ok, state_changed=changed, error=result.error)
             raise RuntimeError(f"Stopped after {self.settings.max_steps} steps without a verified finish")
         except asyncio.CancelledError:

@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 from heybrowsy.config import Settings
 from heybrowsy.models import SpeedMode
-from heybrowsy.provider import AnthropicProvider, GeminiProvider, ProviderRouter
+from heybrowsy.provider import AnthropicProvider, DECISION_SCHEMA, GeminiProvider, ProviderRouter, parse_decision
 
 
 DECISION = json.dumps({
@@ -80,3 +80,14 @@ async def test_router_falls_back_to_next_configured_provider():
     result = await router.decide(goal="Read", mode=SpeedMode.fast, context={}, history=[])
     assert result is expected
 
+
+def test_decision_schema_exposes_backend_analysis_limit_to_providers():
+    assert DECISION_SCHEMA["properties"]["analysis"]["maxLength"] == 1200
+
+
+def test_overlong_analysis_is_trimmed_without_losing_the_action():
+    payload = json.loads(DECISION)
+    payload["analysis"] = "verbose " * 300
+    decision = parse_decision(json.dumps(payload))
+    assert len(decision.analysis) <= 1200
+    assert decision.action.type == "read_page"

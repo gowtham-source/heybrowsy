@@ -15,6 +15,9 @@ For finish, return a useful answer with evidence from the observed page.
 Keep analysis concise. If blocked, finish and clearly explain the blocker.
 After a navigation, use at most one read_page retry when the fingerprint is unchanged; repeated identical reads waste turns.
 The current page snapshot is authoritative for mutable browser state. Session memory is compact background context, not proof of the current page.
+Use working_memory.task_state as a progress ledger: preserve the original goal, entity roles, visited pages, and completed actions.
+Never confuse a profile, contact, product, or document being inspected with the user or original subject merely because it is the current page.
+If the last action left the fingerprint unchanged, do not repeat it. Choose a materially different recovery action or finish with a precise blocker.
 """
 
 
@@ -23,7 +26,11 @@ DECISION_SCHEMA = {
     "additionalProperties": False,
     "required": ["analysis", "action", "answer", "confidence"],
     "properties": {
-        "analysis": {"type": "string"},
+        "analysis": {
+            "type": "string",
+            "maxLength": 1200,
+            "description": "A concise explanation of the next step. Do not restate the full page or goal.",
+        },
         "action": {
             "type": "object", "additionalProperties": False,
             "required": ["id", "type", "element_id", "value", "url", "direction", "amount", "rationale", "expected_change"],
@@ -40,6 +47,15 @@ DECISION_SCHEMA = {
         "confidence": {"type": "number", "description": "Confidence from 0 to 1; validated by the application"},
     },
 }
+
+
+def parse_decision(text: str) -> AgentDecision:
+    """Keep harmless model verbosity from turning a valid browser action into a failed task."""
+    payload = json.loads(text)
+    analysis = payload.get("analysis")
+    if isinstance(analysis, str) and len(analysis) > 1200:
+        payload["analysis"] = analysis[:1199].rstrip() + "…"
+    return AgentDecision.model_validate(payload)
 
 
 class ModelProvider(ABC):
@@ -80,7 +96,7 @@ class OpenAIProvider(ModelProvider):
             text = next((content.get("text") for item in payload.get("output", []) for content in item.get("content", []) if content.get("type") == "output_text"), None)
         if not text:
             raise RuntimeError("Model returned no decision")
-        decision = AgentDecision.model_validate_json(text)
+        decision = parse_decision(text)
         decision.provider = self.name
         decision.model = self.settings.model_for(self.name, mode)
         return decision
@@ -114,7 +130,7 @@ class AnthropicProvider(ModelProvider):
         text = next((block.text for block in response.content if getattr(block, "type", None) == "text"), None)
         if not text:
             raise RuntimeError("Anthropic returned no decision")
-        decision = AgentDecision.model_validate_json(text)
+        decision = parse_decision(text)
         decision.provider = self.name
         decision.model = model
         return decision
@@ -147,7 +163,7 @@ class GeminiProvider(ModelProvider):
         text = getattr(interaction, "output_text", None)
         if not text:
             raise RuntimeError("Gemini returned no decision")
-        decision = AgentDecision.model_validate_json(text)
+        decision = parse_decision(text)
         decision.provider = self.name
         decision.model = model
         return decision
