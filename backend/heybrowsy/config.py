@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     max_steps: int = 24
     action_timeout_seconds: float = 45.0
     approval_timeout_seconds: float = 180.0
+    memory_path: str = "data/session_memory.json"
+    memory_recent_tasks: int = 6
+    history_recent_steps: int = 6
     cors_origins: str = "chrome-extension://*,http://localhost:5173"
 
     def model_for(self, provider: str, mode: str) -> str:

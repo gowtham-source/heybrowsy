@@ -51,7 +51,7 @@ async def task_status(task_id: str):
 
 
 @app.get("/v1/tasks/{task_id}/stream")
-async def task_stream(task_id: str):
+async def task_stream(task_id: str, after: str | None = None):
     task = get_task(task_id)
     queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=100)
     task.subscribers.add(queue)
@@ -59,6 +59,10 @@ async def task_stream(task_id: str):
     async def events():
         try:
             replay = list(task.replay)
+            if after:
+                index = next((index for index, event in enumerate(replay) if event.id == after), None)
+                if index is not None:
+                    replay = replay[index + 1:]
             seen = {event.id for event in replay}
             for event in replay:
                 yield f"data: {event.model_dump_json()}\n\n"

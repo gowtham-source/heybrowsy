@@ -14,6 +14,7 @@ Prefer read-only, reversible actions. Do not claim success without evidence in t
 For finish, return a useful answer with evidence from the observed page.
 Keep analysis concise. If blocked, finish and clearly explain the blocker.
 After a navigation, use at most one read_page retry when the fingerprint is unchanged; repeated identical reads waste turns.
+The current page snapshot is authoritative for mutable browser state. Session memory is compact background context, not proof of the current page.
 """
 
 
@@ -45,7 +46,7 @@ class ModelProvider(ABC):
     name = "unknown"
 
     @abstractmethod
-    async def decide(self, *, goal: str, mode: SpeedMode, context: dict, history: list[dict]) -> AgentDecision: ...
+    async def decide(self, *, goal: str, mode: SpeedMode, context: dict, history: dict[str, Any]) -> AgentDecision: ...
 
     async def close(self) -> None:
         return None
@@ -58,8 +59,8 @@ class OpenAIProvider(ModelProvider):
         self.settings = settings
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(45, connect=10), limits=httpx.Limits(max_connections=50, max_keepalive_connections=20))
 
-    async def decide(self, *, goal: str, mode: SpeedMode, context: dict, history: list[dict]) -> AgentDecision:
-        prompt = json.dumps({"user_goal": goal, "page": context, "recent_actions": history}, ensure_ascii=False)
+    async def decide(self, *, goal: str, mode: SpeedMode, context: dict, history: dict[str, Any]) -> AgentDecision:
+        prompt = json.dumps({"user_goal": goal, "page": context, "working_memory": history}, ensure_ascii=False)
         response = await self.client.post(
             f"{self.settings.openai_base_url}/responses",
             headers={"Authorization": f"Bearer {self.settings.openai_api_key}", "Content-Type": "application/json"},
@@ -100,9 +101,9 @@ class AnthropicProvider(ModelProvider):
             options["base_url"] = settings.anthropic_base_url
         self.client = AsyncAnthropic(**options)
 
-    async def decide(self, *, goal: str, mode: SpeedMode, context: dict, history: list[dict]) -> AgentDecision:
+    async def decide(self, *, goal: str, mode: SpeedMode, context: dict[str, Any], history: dict[str, Any]) -> AgentDecision:
         model = self.settings.model_for(self.name, mode)
-        prompt = json.dumps({"user_goal": goal, "page": context, "recent_actions": history}, ensure_ascii=False)
+        prompt = json.dumps({"user_goal": goal, "page": context, "working_memory": history}, ensure_ascii=False)
         response = await self.client.messages.create(
             model=model,
             max_tokens=2048,
@@ -131,9 +132,9 @@ class GeminiProvider(ModelProvider):
         self.settings = settings
         self.client = genai.Client(api_key=settings.gemini_api_key)
 
-    async def decide(self, *, goal: str, mode: SpeedMode, context: dict, history: list[dict]) -> AgentDecision:
+    async def decide(self, *, goal: str, mode: SpeedMode, context: dict[str, Any], history: dict[str, Any]) -> AgentDecision:
         model = self.settings.model_for(self.name, mode)
-        payload = json.dumps({"user_goal": goal, "page": context, "recent_actions": history}, ensure_ascii=False)
+        payload = json.dumps({"user_goal": goal, "page": context, "working_memory": history}, ensure_ascii=False)
         thinking = {SpeedMode.fast: "minimal", SpeedMode.balanced: "medium", SpeedMode.accurate: "high"}[mode]
         interaction = await self.client.aio.interactions.create(
             model=model,
@@ -158,8 +159,8 @@ class GeminiProvider(ModelProvider):
 class DemoProvider(ModelProvider):
     name = "demo"
     """Safe no-key mode: reads the page and demonstrates the full transport loop."""
-    async def decide(self, *, goal: str, mode: SpeedMode, context: dict, history: list[dict]) -> AgentDecision:
-        if not history:
+    async def decide(self, *, goal: str, mode: SpeedMode, context: dict[str, Any], history: dict[str, Any]) -> AgentDecision:
+        if not history.get("recent_steps"):
             return AgentDecision(analysis="Refreshing the semantic page context.", action=BrowserAction(type="read_page", rationale="Get the latest page state", expected_change="Fresh snapshot"), confidence=1, provider=self.name, model="deterministic-demo")
         title, text = context.get("title", "this page"), context.get("visible_text", "")[:900]
         return AgentDecision(
@@ -186,7 +187,7 @@ class ProviderRouter(ModelProvider):
             self.providers["gemini"] = GeminiProvider(settings)
         self.demo = DemoProvider()
 
-    async def decide(self, *, goal: str, mode: SpeedMode, context: dict, history: list[dict]) -> AgentDecision:
+    async def decide(self, *, goal: str, mode: SpeedMode, context: dict[str, Any], history: dict[str, Any]) -> AgentDecision:
         if not self.providers:
             return await self.demo.decide(goal=goal, mode=mode, context=context, history=history)
         candidates = self.settings.provider_candidates(mode.value)

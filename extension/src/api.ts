@@ -9,17 +9,18 @@ export class HeyBrowsyApi {
     return response.json();
   }
 
-  async createTask(goal: string, mode: SpeedMode, snapshot: PageSnapshot) {
+  async createTask(goal: string, mode: SpeedMode, snapshot: PageSnapshot, sessionId?: string) {
     const response = await fetch(`${this.baseUrl}/v1/tasks`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal, mode, initial_snapshot: snapshot }),
+      body: JSON.stringify({ goal, mode, session_id: sessionId, initial_snapshot: snapshot }),
     });
     if (!response.ok) throw new Error(await response.text());
     return response.json() as Promise<{ id: string }>;
   }
 
-  stream(taskId: string, onEvent: (event: AgentEvent) => void) {
-    const source = new EventSource(`${this.baseUrl}/v1/tasks/${taskId}/stream`);
+  stream(taskId: string, onEvent: (event: AgentEvent) => void, afterEventId?: string) {
+    const query = afterEventId ? `?after=${encodeURIComponent(afterEventId)}` : "";
+    const source = new EventSource(`${this.baseUrl}/v1/tasks/${taskId}/stream${query}`);
     source.onmessage = (message) => onEvent(JSON.parse(message.data));
     source.onerror = () => onEvent({ type: "connection_error", task_id: taskId, timestamp: new Date().toISOString(), data: {} });
     return source;

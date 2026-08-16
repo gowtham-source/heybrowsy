@@ -3,7 +3,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 from .config import Settings
-from .context import compact_history, compact_snapshot
+from .context import compact_action_result, compact_history, compact_snapshot
+from .memory import SessionMemoryStore
 from .models import ActionResult, BrowserAction, Event, PageSnapshot, TaskCreate
 from .provider import ModelProvider
 from .security import approval_reason
@@ -24,6 +25,7 @@ class TaskRuntime:
     approval_waiters: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
     replay: list[Event] = field(default_factory=list)
     cancelled: bool = False
+    memory_recorded: bool = False
 
     async def emit(self, event_type: str, **data: Any) -> None:
         event = Event(type=event_type, task_id=self.id, data=data)
@@ -38,6 +40,7 @@ class AgentHarness:
         self.provider = provider
         self.settings = settings
         self.tasks: dict[str, TaskRuntime] = {}
+        self.memory = SessionMemoryStore(settings.memory_path, settings.memory_recent_tasks)
 
     def create(self, request: TaskCreate) -> TaskRuntime:
         task_id = uuid4().hex
@@ -52,15 +55,17 @@ class AgentHarness:
             await task.emit("status", status="running", message=f"Starting in {task.request.mode.value} mode")
             for step in range(self.settings.max_steps):
                 if task.cancelled:
-                    task.status = "cancelled"; await task.emit("cancelled"); return
+                    await self._finalize(task, "cancelled"); return
                 context = compact_snapshot(task.snapshot, task.request.goal, max_text=4500 if task.request.mode.value == "fast" else 7000)
-                decision = await self.provider.decide(goal=task.request.goal, mode=task.request.mode, context=context, history=compact_history(task.history))
+                memory = self.memory.context(task.request.session_id)
+                history = compact_history(task.history, memory, self.settings.history_recent_steps)
+                decision = await self.provider.decide(goal=task.request.goal, mode=task.request.mode, context=context, history=history)
                 await task.emit("thought", message=decision.analysis, confidence=decision.confidence, step=step + 1, provider=decision.provider, model=decision.model)
                 action = decision.action
                 action.id = action.id or uuid4().hex
                 if action.type == "finish":
-                    task.status = "complete"
-                    await task.emit("complete", answer=decision.answer or "Task complete", steps=len(task.history), confidence=decision.confidence)
+                    answer = decision.answer or "Task complete"
+                    await self._finalize(task, "complete", answer, steps=len(task.history), confidence=decision.confidence)
                     return
                 element = next((item for item in task.snapshot.elements if item.id == action.element_id), None)
                 element_description = f"{element.name} {element.type or ''}" if element else ""
@@ -71,7 +76,7 @@ class AgentHarness:
                         task.history.append({"action": action.model_dump(), "result": {"ok": False, "error": "User rejected action"}})
                         continue
                 result = await self._execute(task, action)
-                task.history.append({"action": action.model_dump(exclude_none=True), "result": result.model_dump(exclude_none=True)})
+                task.history.append({"action": action.model_dump(exclude_none=True), "result": compact_action_result(result)})
                 if result.snapshot:
                     old_fingerprint = task.snapshot.fingerprint
                     task.snapshot = result.snapshot
@@ -81,9 +86,32 @@ class AgentHarness:
                 await task.emit("verification", action_id=action.id, ok=result.ok, state_changed=changed, error=result.error)
             raise RuntimeError(f"Stopped after {self.settings.max_steps} steps without a verified finish")
         except asyncio.CancelledError:
-            task.status = "cancelled"; await task.emit("cancelled")
+            await self._finalize(task, "cancelled")
         except Exception as exc:
-            task.status = "failed"; await task.emit("failed", error=str(exc))
+            await self._finalize(task, "failed", str(exc), error=str(exc))
+
+    async def _finalize(self, task: TaskRuntime, status: str, answer: str | None = None, **event_data: Any) -> None:
+        task.status = status
+        if not task.memory_recorded:
+            try:
+                self.memory.record_task(
+                    task.request.session_id,
+                    goal=task.request.goal,
+                    status=status,
+                    answer=answer,
+                    actions=task.history,
+                    url=task.snapshot.url,
+                    title=task.snapshot.title,
+                )
+                task.memory_recorded = True
+            except OSError:
+                pass
+        if status == "complete":
+            await task.emit("complete", answer=answer or "Task complete", **event_data)
+        elif status == "failed":
+            await task.emit("failed", **event_data)
+        else:
+            await task.emit("cancelled")
 
     async def _execute(self, task: TaskRuntime, action: BrowserAction) -> ActionResult:
         loop = asyncio.get_running_loop()

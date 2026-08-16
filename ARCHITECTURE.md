@@ -1,17 +1,6 @@
 # heybrowsy architecture
 
-## Reference analysis
-
-The installed reference package (`fcoeoabgfenejglbffodgkkbkcdhcgfn`, version 1.0.85) uses the architecture expected of a serious MV3 browser agent:
-
-- a side-panel UI and toolbar/keyboard entry points;
-- an ES module service worker;
-- page-level accessibility extraction and a separate visual indicator;
-- a background/offscreen bridge;
-- broad browser capabilities including tabs, scripting, downloads, debugger, storage, navigation, and native messaging;
-- remote API and WebSocket connectivity.
-
-heybrowsy adopts the useful architectural boundaries while using a smaller permission surface and original code. Page access is optional and requested only when a task begins. The initial build deliberately omits debugger/native-messaging access.
+heybrowsy uses a small, deliberate permission surface. Page access is optional and requested only when a task begins. The initial build deliberately omits debugger and native-messaging access.
 
 ## Runtime flow
 
@@ -46,7 +35,7 @@ Each task is a small state machine, not an open-ended chat loop:
 4. Apply the risk policy and pause when approval is required.
 5. Execute via the extension.
 6. Compare page fingerprints and record the result.
-7. Continue with only recent action history.
+7. Continue with compact working memory: six detailed steps plus high-signal summaries of older steps.
 8. Stop on verified completion, cancellation, timeout, or the maximum step budget.
 
 The event stream separates reasoning/status, approval requests, actions, verification, and completion. Action and approval waiters are keyed by unpredictable IDs, have explicit timeouts, and cannot be submitted twice.
@@ -87,12 +76,16 @@ The webpage never enters the instruction hierarchy. It is represented as untrust
 - URL and title;
 - a bounded visible-text excerpt;
 - selected text;
-- up to 180 visible interactive elements;
+- up to 180 interactive elements, prioritizing visible editors and controls;
 - stable per-snapshot element IDs;
 - role, accessible name, state, value, link, and viewport geometry;
 - a page fingerprint and injection-risk flag.
 
-Before a model request, elements are ranked against meaningful goal terms and capped again. Only the latest eight action/result records are retained in the prompt. This keeps latency predictable and reduces stale context. The system prompt states the trust boundary once, keeps tool rules concise, and requires grounded completion.
+Before a model request, elements are ranked against meaningful goal terms and capped again. Raw page snapshots are never copied into action history. The active working set contains the six newest compact action records, while older steps become short state-transition summaries. Completed task outcomes, final locations, and bounded action summaries are stored locally in `backend/data/session_memory.json` and recalled by browser-tab session. Mutable page state must always be re-observed.
+
+The side-panel transcript is a separate audit layer. Up to 400 entries are retained in local extension storage, 80 are rendered at once, and older entries can be progressively revealed. An SSE event cursor allows a closed and reopened panel to resume an active task without replaying completed browser actions.
+
+This follows Anthropic's context-engineering hierarchy: clear bulky old tool results first, compact older trajectory details, and retain structured memory outside the active context. It does not spend an additional model call on every compaction.
 
 ## Fast pace without sacrificing accuracy
 

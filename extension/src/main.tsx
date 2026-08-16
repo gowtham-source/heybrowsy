@@ -28,19 +28,59 @@ function App() {
     const value = Number(new URLSearchParams(location.search).get("tabId"));
     return Number.isInteger(value) && value > 0 ? value : undefined;
   }, []);
+  const sessionId = useMemo(() => `browser-tab-${anchorTabId ?? "active"}`, [anchorTabId]);
+  const activeTaskKey = useMemo(() => `heybrowsy.active.${sessionId}`, [sessionId]);
   const [goal, setGoal] = useState("");
   const [mode, setMode] = useState<SpeedMode>("balanced");
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState(false);
   const [taskId, setTaskId] = useState<string>();
   const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [visibleFeedCount, setVisibleFeedCount] = useState(80);
   const [approval, setApproval] = useState<Approval>();
   const feedRef = useRef<HTMLElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const streamRef = useRef<EventSource | undefined>(undefined);
   const eventQueueRef = useRef(Promise.resolve());
   const processedEventsRef = useRef(new Set<string>());
+  const queuedEventsRef = useRef(new Set<string>());
+  const resumeAttemptedRef = useRef(false);
 
   useEffect(() => { api.health().then(() => setConnected(true)).catch(() => setConnected(false)); }, [api]);
+  useEffect(() => {
+    const key = `heybrowsy.feed.${sessionId}`;
+    void chrome.storage.local.get(key).then((stored) => {
+      const restored = stored[key];
+      if (Array.isArray(restored)) setFeed(restored.slice(-400) as FeedItem[]);
+      setHistoryLoaded(true);
+    });
+  }, [sessionId]);
+  useEffect(() => {
+    if (resumeAttemptedRef.current) return;
+    resumeAttemptedRef.current = true;
+    void chrome.storage.session.get(activeTaskKey).then(async (stored) => {
+      const active = stored[activeTaskKey] as { taskId?: string; lastEventId?: string } | undefined;
+      if (!active?.taskId) return;
+      setTaskId(active.taskId); setRunning(true);
+      processedEventsRef.current.clear(); queuedEventsRef.current.clear();
+      streamRef.current?.close();
+      streamRef.current = api.stream(active.taskId, enqueueEvent, active.lastEventId);
+    }).catch((error) => append("error", `Could not resume task: ${String(error)}`));
+  }, [activeTaskKey, api]);
+  useEffect(() => {
+    if (!historyLoaded) return;
+    const key = `heybrowsy.feed.${sessionId}`;
+    const timeout = setTimeout(() => { void chrome.storage.local.set({ [key]: feed.slice(-400) }); }, 120);
+    return () => clearTimeout(timeout);
+  }, [feed, historyLoaded, sessionId]);
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    textarea.style.height = `${Math.min(132, Math.max(38, textarea.scrollHeight))}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 132 ? "auto" : "hidden";
+  }, [goal]);
   useEffect(() => {
     const feedElement = feedRef.current;
     if (feedElement) feedElement.scrollTo({ top: feedElement.scrollHeight, behavior: "smooth" });
@@ -79,16 +119,29 @@ function App() {
     if (event.type === "cancelled") { append("agent", "Task stopped"); setRunning(false); setApproval(undefined); }
     if (["complete", "failed", "cancelled"].includes(event.type)) {
       streamRef.current?.close();
+      await chrome.storage.session.remove(activeTaskKey);
       await chrome.runtime.sendMessage({ type: "HB_RELEASE_BROWSER" }).catch(() => undefined);
     }
   }
 
   function enqueueEvent(event: AgentEvent) {
     if (event.id && processedEventsRef.current.has(event.id)) return;
-    if (event.id) processedEventsRef.current.add(event.id);
+    if (event.id && queuedEventsRef.current.has(event.id)) return;
+    if (event.id) queuedEventsRef.current.add(event.id);
     eventQueueRef.current = eventQueueRef.current
       .then(() => onEvent(event))
-      .catch((error) => { append("error", `Event handling failed: ${String(error)}`); setRunning(false); });
+      .then(async () => {
+        if (event.id) {
+          queuedEventsRef.current.delete(event.id);
+          processedEventsRef.current.add(event.id);
+          if (["complete", "failed", "cancelled"].includes(event.type)) await chrome.storage.session.remove(activeTaskKey);
+          else await chrome.storage.session.set({ [activeTaskKey]: { taskId: event.task_id, lastEventId: event.id } });
+        }
+      })
+      .catch((error) => {
+        if (event.id) queuedEventsRef.current.delete(event.id);
+        append("error", `Event handling failed: ${String(error)}`); setRunning(false);
+      });
   }
 
   async function run() {
@@ -99,9 +152,10 @@ function App() {
       if (!permission) throw new Error("Page access is required to run browser tasks");
       const page = await chrome.runtime.sendMessage({ type: "HB_ATTACH_BROWSER", tabId: anchorTabId }) as { ok: boolean; snapshot?: PageSnapshot; error?: string };
       if (!page.ok || !page.snapshot) throw new Error(page.error || "Could not read the active page");
-      const task = await api.createTask(goal.trim(), mode, page.snapshot);
+      const task = await api.createTask(goal.trim(), mode, page.snapshot, sessionId);
       setTaskId(task.id); setGoal("");
-      processedEventsRef.current.clear();
+      processedEventsRef.current.clear(); queuedEventsRef.current.clear();
+      await chrome.storage.session.set({ [activeTaskKey]: { taskId: task.id } });
       streamRef.current?.close();
       streamRef.current = api.stream(task.id, enqueueEvent);
     } catch (error) {
@@ -123,6 +177,7 @@ function App() {
     catch (error) { append("error", `Could not stop task: ${String(error)}`); }
     streamRef.current?.close();
     setRunning(false); setApproval(undefined);
+    await chrome.storage.session.remove(activeTaskKey);
     await chrome.runtime.sendMessage({ type: "HB_RELEASE_BROWSER" }).catch(() => undefined);
   }
 
@@ -141,7 +196,8 @@ function App() {
         {["Summarize this page with key evidence", "Find the pricing and compare plans", "Fill this form, but ask before submitting"].map((text) =>
           <button key={text} onClick={() => setGoal(text)}>{text}<span>↗</span></button>)}
       </div>}
-      {feed.map((item) => <article key={item.id} className={item.kind}><span>{item.kind === "user" ? "YOU" : item.kind === "tool" ? "ACTION" : "BROWSY"}</span><p>{item.text}</p></article>)}
+      {feed.length > visibleFeedCount && <button className="show-earlier" onClick={() => setVisibleFeedCount((count) => count + 80)}>Show earlier activity</button>}
+      {feed.slice(-visibleFeedCount).map((item) => <article key={item.id} className={item.kind}><span>{item.kind === "user" ? "YOU" : item.kind === "tool" ? "ACTION" : "BROWSY"}</span><p>{item.text}</p></article>)}
       {running && <div className="thinking"><b/><b/><b/></div>}
     </section>
     {approval && <aside className="approval">
@@ -153,7 +209,7 @@ function App() {
         {(["fast", "balanced", "accurate"] as SpeedMode[]).map((item) => <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}>{item}</button>)}
       </div>
       <div className="composer">
-        <textarea aria-label="Task" placeholder="Ask heybrowsy to do something…" value={goal} onChange={(e) => setGoal(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void run(); }}} />
+        <textarea ref={textareaRef} rows={1} aria-label="Task" placeholder="Ask heybrowsy to do something…" value={goal} onChange={(e) => setGoal(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void run(); }}} />
         {running ? <button className="send stop" aria-label="Stop task" onClick={stop}>■</button> : <button className="send" aria-label="Run task" onClick={run}>↑</button>}
       </div>
       <small>heybrowsy can make mistakes. Review high-impact actions.</small>

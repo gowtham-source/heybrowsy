@@ -11,6 +11,7 @@ A local-first Chrome extension that acts as an AI-powered browser work agent. It
 - **Tab group integration** — active tasks attach to a colored tab group with a glow ring, action label, and animated agent cursor
 - **Streaming progress** — FastAPI task API with SSE events for reasoning, actions, approvals, and verification
 - **Plan → act → observe → verify loop** with bounded retries and a configurable step budget
+- **Long-session continuity** with persistent transcript, resumable event cursors, compact working context, and local structured memory
 - **Multi-provider model routing** — OpenAI, Anthropic, and Google with per-mode selection and automatic fallback
 - **Approval gates** — submissions, publishing, deletion, purchases, sensitive typing, and sensitive domains require human confirmation
 - **Safety** — web content isolation, prompt-injection detection, no arbitrary JS execution

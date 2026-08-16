@@ -50,6 +50,7 @@ class PageSnapshot(BaseModel):
 class TaskCreate(BaseModel):
     goal: str = Field(min_length=2, max_length=8_000)
     mode: SpeedMode = SpeedMode.balanced
+    session_id: str | None = Field(default=None, min_length=3, max_length=160, pattern=r"^[a-zA-Z0-9._:-]+$")
     initial_snapshot: PageSnapshot
 
 
